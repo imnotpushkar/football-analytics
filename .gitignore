@@ -1,0 +1,23 @@
+# Virtual environment — thousands of files, never commit these
+venv/
+
+# Python cache files — auto-generated, not source code
+__pycache__/
+*.pyc
+*.pyo
+
+# Environment variables — contains API keys, NEVER commit this
+.env
+
+# Raw and processed data — too large, machine-generated
+data/
+
+# Database file — machine-generated
+*.db
+
+# VS Code settings — editor-specific, not project-specific
+.vscode/
+
+# OS junk
+.DS_Store
+Thumbs.db
