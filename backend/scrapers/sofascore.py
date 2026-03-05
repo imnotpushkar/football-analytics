@@ -263,20 +263,19 @@ def get_full_match_data(date_str: str, home_team: str,
 
 
 # -------------------------------------------------------------------------
-# Quick test
+# Quick test — run directly to probe the incidents endpoint
 # -------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    print("Testing SofaScore scraper...\n")
-
-    raw_data = _get("/match/lineups", params={"match_id": "14023985"})
-
-    print("--- Home players with substitute flag ---")
-    home_raw = raw_data.get("home", {}).get("players", [])
-    for i, p in enumerate(home_raw):
-        sub_flag = p.get("substitute", "?")
-        label = "BENCH  " if sub_flag else "START  "
-        print(f"  [{i:02d}] {label} | "
-              f"{p.get('name'):25} | "
-              f"pos={p.get('position'):3} | "
-              f"jersey={p.get('jerseyNumber')}")
+    print("Testing incidents endpoint...\n")
+    try:
+        data = _get("/match/incidents", params={"match_id": "14023985"})
+        print(f"Response type: {type(data)}")
+        if isinstance(data, list):
+            for item in data[:5]:
+                print(item)
+        elif isinstance(data, dict):
+            for key in list(data.keys())[:3]:
+                print(f"{key}: {data[key]}")
+    except Exception as e:
+        print(f"Failed: {e}")

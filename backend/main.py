@@ -7,11 +7,11 @@ Orchestrates the full V1 pipeline:
     3. Clean and store competitions, teams, matches
     4. Find the most recent finished match
     5. Fetch SofaScore stats and lineups for that match
-    6. Generate creator-quality AI summary
-    7. Save summary to DB and print it
+    6. Fetch SofaScore incidents (goals, cards, subs)  ← NEW
+    7. Generate creator-quality AI summary
+    8. Save summary and events to DB
 
 Run with: python -m backend.main
-This is also what n8n will trigger via a scheduled Execute Command node.
 """
 
 import sys
@@ -22,6 +22,7 @@ from backend.db.writer import (
     save_competitions,
     save_teams,
     save_matches,
+    save_match_events,
     save_summary,
     get_match_ids_in_db,
 )
@@ -35,6 +36,7 @@ from backend.processors.cleaner import (
     clean_matches,
     clean_sofascore_stats,
     clean_sofascore_lineups,
+    clean_match_incidents,
     build_match_context,
 )
 from backend.summarizer.summarize import summarize_match
@@ -55,7 +57,7 @@ TARGET_COMPETITION_NAME = "Premier League"
 
 def step_init():
     """Step 1: Ensure DB exists with all tables."""
-    print("[1/6] Initializing database...")
+    print("[1/7] Initializing database...")
     init_db()
     print("      Done.\n")
 
@@ -69,7 +71,7 @@ def step_fetch_and_store(competition_code: str,
     Returns:
         List of all raw match dicts from the API.
     """
-    print(f"[2/6] Fetching matches for: {competition_code}...")
+    print(f"[2/7] Fetching matches for: {competition_code}...")
 
     raw_matches = get_matches_by_competition(competition_code)
     print(f"      Found {len(raw_matches)} matches from API.")
@@ -107,7 +109,7 @@ def step_get_latest_finished_match(raw_matches: list) -> dict | None:
     Returns:
         Single raw match dict, or None if no finished matches found.
     """
-    print("[3/6] Finding most recent finished match...")
+    print("[3/7] Finding most recent finished match...")
 
     finished = [m for m in raw_matches if m.get("status") == "FINISHED"]
 
@@ -130,8 +132,6 @@ def step_get_latest_finished_match(raw_matches: list) -> dict | None:
 def step_fetch_sofascore_data(raw_match: dict) -> dict:
     """
     Step 4: Fetch SofaScore statistics and lineups for the match.
-    Bridges Football-Data.org match data with SofaScore match IDs
-    using team names and date for matching.
 
     Returns:
         Dict with "stats" and "lineups" keys, or empty dict on failure.
@@ -142,7 +142,8 @@ def step_fetch_sofascore_data(raw_match: dict) -> dict:
     away_team = raw_match.get("awayTeam", {}).get("name", "")
     date_str = raw_match.get("utcDate", "")[:10]
 
-    print(f"[4/6] Fetching SofaScore data: {home_team} vs {away_team}...")
+    print(f"[4/7] Fetching SofaScore stats + lineups: "
+          f"{home_team} vs {away_team}...")
 
     try:
         result = get_full_match_data(date_str, home_team, away_team)
@@ -165,6 +166,9 @@ def step_fetch_sofascore_data(raw_match: dict) -> dict:
         return {
             "stats": cleaned_stats,
             "lineups": cleaned_lineups,
+            # Pass raw incidents through for step 5 to clean separately
+            "raw_incidents": result.get("incidents", {}),
+            "sofascore_match_id": result.get("match_id"),
         }
 
     except Exception as e:
@@ -173,17 +177,54 @@ def step_fetch_sofascore_data(raw_match: dict) -> dict:
         return {}
 
 
-def step_summarize(raw_match: dict, competition_name: str,
-                   sofascore_data: dict) -> str:
+def step_fetch_incidents(sofascore_data: dict, home_team: str,
+                          away_team: str) -> dict:
     """
-    Step 5: Build full match context and generate AI summary.
-    Uses SofaScore stats and lineups if available, falls back
-    to match-only data gracefully.
+    Step 5: Clean match incidents (goals, cards, subs) from the
+    raw incidents data fetched in step 4.
+
+    Incidents are fetched as part of get_full_match_data() in step 4
+    and stored in sofascore_data["raw_incidents"]. This step cleans
+    and structures them.
+
+    Returns:
+        Output of clean_match_incidents() — goals, cards, subs, events_text.
+        Returns empty dict if incidents unavailable.
+    """
+    print("[5/7] Processing match incidents (goals, cards, subs)...")
+
+    raw_incidents = sofascore_data.get("raw_incidents", {})
+
+    if not raw_incidents:
+        print("      No incidents data available.\n")
+        return {}
+
+    try:
+        cleaned = clean_match_incidents(raw_incidents, home_team, away_team)
+        goal_count = len(cleaned.get("goals", []))
+        card_count = len(cleaned.get("cards", []))
+        sub_count = len(cleaned.get("substitutions", []))
+        print(f"      Goals: {goal_count} | Cards: {card_count} "
+              f"| Subs: {sub_count}")
+        print(f"      Events text preview: "
+              f"{cleaned.get('events_text', '')[:80]}...\n")
+        return cleaned
+    except Exception as e:
+        print(f"      Incidents processing failed: {e}\n")
+        return {}
+
+
+def step_summarize(raw_match: dict, competition_name: str,
+                   sofascore_data: dict, incidents: dict) -> str:
+    """
+    Step 6: Build full match context and generate AI summary.
+    Now includes match events in the context so the AI knows
+    who scored, when, and who was carded.
 
     Returns:
         Summary text string.
     """
-    print("[5/6] Generating AI summary...")
+    print("[6/7] Generating AI summary...")
 
     match_data = {
         "home_team": raw_match.get("homeTeam", {}).get("name", "Unknown"),
@@ -200,18 +241,18 @@ def step_summarize(raw_match: dict, competition_name: str,
             match_data,
             sofascore_data.get("stats", {}),
             sofascore_data.get("lineups", {}),
+            sofascore_incidents=incidents,
         )
     else:
         context = {
             **match_data,
-            "home_stats": {},
-            "away_stats": {},
+            "home_stats": {}, "away_stats": {},
             "narrative_hints": [],
-            "home_formation": "Unknown",
-            "away_formation": "Unknown",
-            "home_players": [],
-            "away_players": [],
+            "home_formation": "Unknown", "away_formation": "Unknown",
+            "home_players": [], "away_players": [],
             "lineups_confirmed": False,
+            "goals": [], "cards": [], "substitutions": [],
+            "events_text": incidents.get("events_text", ""),
         }
 
     summary = summarize_match(context)
@@ -219,10 +260,15 @@ def step_summarize(raw_match: dict, competition_name: str,
     return summary
 
 
-def step_save_summary(match_id: int, summary: str):
-    """Step 6: Persist the AI summary to the DB."""
-    print("[6/6] Saving summary to database...")
+def step_save(match_id: int, summary: str, incidents: dict):
+    """Step 7: Persist the AI summary and match events to DB."""
+    print("[7/7] Saving summary and events to database...")
     save_summary(match_id, summary)
+
+    if incidents:
+        saved_events = save_match_events(match_id, incidents)
+        print(f"      Saved {saved_events} match event(s).")
+
     print("      Done.\n")
 
 
@@ -257,11 +303,17 @@ def run_pipeline(
         print("No finished matches available. Exiting.")
         sys.exit(0)
 
+    home_team = latest_match.get("homeTeam", {}).get("name", "")
+    away_team = latest_match.get("awayTeam", {}).get("name", "")
+
     sofascore_data = step_fetch_sofascore_data(latest_match)
+    incidents = step_fetch_incidents(sofascore_data, home_team, away_team)
 
-    summary = step_summarize(latest_match, competition_name, sofascore_data)
+    summary = step_summarize(
+        latest_match, competition_name, sofascore_data, incidents
+    )
 
-    step_save_summary(latest_match["id"], summary)
+    step_save(latest_match["id"], summary, incidents)
 
     elapsed = (datetime.now() - start).seconds
     print("=" * 55)

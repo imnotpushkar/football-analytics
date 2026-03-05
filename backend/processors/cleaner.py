@@ -335,11 +335,6 @@ def clean_sofascore_lineups(raw_lineups: dict) -> dict:
         - Substitutes are included separately without tactical roles
         - Tactical roles assigned via formation_roles.map_tactical_roles()
 
-    Why we filter by substitute flag rather than index:
-        SofaScore guarantees starters come first (indices 0-10) but
-        using the explicit substitute flag is more robust — if SofaScore
-        ever changes ordering, the flag stays reliable.
-
     Args:
         raw_lineups: Output of get_match_lineups() from sofascore.py
 
@@ -377,7 +372,6 @@ def clean_sofascore_lineups(raw_lineups: dict) -> dict:
         starters = [p for p in players if not p.get("substitute", True)]
         subs = [p for p in players if p.get("substitute", False)]
 
-        # Fallback: if substitute flag missing, use first 11
         if not starters:
             starters = players[:11]
             subs = players[11:]
@@ -393,13 +387,11 @@ def clean_sofascore_lineups(raw_lineups: dict) -> dict:
     home_starters_raw, home_subs_raw = _split_starters_subs(home_all)
     away_starters_raw, away_subs_raw = _split_starters_subs(away_all)
 
-    # Format players
     home_starters = [_format_player(p) for p in home_starters_raw]
     away_starters = [_format_player(p) for p in away_starters_raw]
     home_subs = [_format_player(p) for p in home_subs_raw]
     away_subs = [_format_player(p) for p in away_subs_raw]
 
-    # Assign tactical roles to starters only
     home_starters = map_tactical_roles(home_starters, home_formation)
     away_starters = map_tactical_roles(away_starters, away_formation)
 
@@ -414,20 +406,146 @@ def clean_sofascore_lineups(raw_lineups: dict) -> dict:
     }
 
 
-def build_match_context(match_data: dict, sofascore_stats: dict,
-                         sofascore_lineups: dict) -> dict:
+def clean_match_incidents(raw_incidents: dict, home_team: str,
+                           away_team: str) -> dict:
     """
-    Combines Football-Data.org match data with SofaScore stats and
-    lineups into a single rich context dict for the AI summarizer.
+    Parses the raw SofaScore incidents response into structured
+    goals, cards, and substitutions.
+
+    Raw incidents come in reverse chronological order — this function
+    sorts them by minute ascending so the timeline reads naturally.
+
+    We ignore incidentType "period" and "injuryTime" — these are
+    structural markers (half-time, added time) with no event data.
+
+    Args:
+        raw_incidents: Output of get_match_incidents() from sofascore.py
+            Expected keys: incidents (list), home (dict), away (dict)
+        home_team: Home team name string (for label in output)
+        away_team: Away team name string (for label in output)
+
+    Returns:
+        Dict with keys:
+            goals: list of dicts — minute, scorer, assist, team, type
+                   type is one of: "regular", "penalty", "own-goal"
+            cards: list of dicts — minute, player, team, card_type, reason
+                   card_type is one of: "yellow", "yellow-red", "red"
+            substitutions: list of dicts — minute, player_off, player_on,
+                           team, injury (bool)
+            events_text: formatted string for the AI prompt
+                   e.g. "22' YELLOW CARD Gravenberch (Liverpool FC)
+                         69' YELLOW CARD João Gomes (Wolves)
+                         78' GOAL Rodrigo Gomes (assist: Arokodare) (Wolves)"
+
+    Returns empty dict if raw_incidents is empty or missing.
+    """
+    if not raw_incidents:
+        return {}
+
+    incidents = raw_incidents.get("incidents", [])
+    if not incidents:
+        return {}
+
+    # Sort chronologically — raw list is newest-first
+    incidents_sorted = sorted(incidents, key=lambda x: x.get("time", 0))
+
+    goals = []
+    cards = []
+    substitutions = []
+
+    for inc in incidents_sorted:
+        inc_type = inc.get("incidentType")
+        minute = inc.get("time", 0)
+        is_home = inc.get("isHome", True)
+        team = home_team if is_home else away_team
+
+        if inc_type == "goal":
+            scorer = inc.get("player", {}).get("name", "Unknown")
+            assist = inc.get("assist1", {}).get("name") if inc.get("assist1") else None
+            goal_class = inc.get("incidentClass", "regular")
+            # incidentClass can be "regular", "penalty", "own-goal"
+            goals.append({
+                "minute": minute,
+                "scorer": scorer,
+                "assist": assist,
+                "team": team,
+                "type": goal_class,
+            })
+
+        elif inc_type == "card":
+            player = inc.get("player", {}).get("name", "Unknown")
+            card_class = inc.get("incidentClass", "yellow")
+            reason = inc.get("reason", "")
+            cards.append({
+                "minute": minute,
+                "player": player,
+                "team": team,
+                "card_type": card_class,
+                "reason": reason,
+            })
+
+        elif inc_type == "substitution":
+            player_off = inc.get("playerOut", {}).get("name", "Unknown")
+            player_on = inc.get("playerIn", {}).get("name", "Unknown")
+            injury = inc.get("injury", False)
+            substitutions.append({
+                "minute": minute,
+                "player_off": player_off,
+                "player_on": player_on,
+                "team": team,
+                "injury": injury,
+            })
+
+    # Build a compact events_text string for the AI prompt
+    # Goals and cards only — substitutions are too noisy for the narrative
+    event_lines = []
+
+    for card in cards:
+        card_label = card["card_type"].upper().replace("-", " ")
+        reason_str = f" ({card['reason']})" if card.get("reason") else ""
+        event_lines.append(
+            f"{card['minute']}' {card_label} CARD — "
+            f"{card['player']} ({card['team']}){reason_str}"
+        )
+
+    for goal in goals:
+        assist_str = f" (assist: {goal['assist']})" if goal.get("assist") else ""
+        type_str = f" [{goal['type']}]" if goal["type"] != "regular" else ""
+        event_lines.append(
+            f"{goal['minute']}' GOAL{type_str} — "
+            f"{goal['scorer']}{assist_str} ({goal['team']})"
+        )
+
+    # Sort the combined lines by the minute prefix so they read chronologically
+    event_lines.sort(key=lambda line: int(line.split("'")[0]))
+
+    return {
+        "goals": goals,
+        "cards": cards,
+        "substitutions": substitutions,
+        "events_text": "\n".join(event_lines) if event_lines else "No events recorded.",
+    }
+
+
+def build_match_context(match_data: dict, sofascore_stats: dict,
+                         sofascore_lineups: dict,
+                         sofascore_incidents: dict = None) -> dict:
+    """
+    Combines Football-Data.org match data with SofaScore stats, lineups,
+    and incidents into a single rich context dict for the AI summarizer.
 
     Args:
         match_data: Basic match info dict (teams, score, competition, date)
         sofascore_stats: Output of clean_sofascore_stats()
         sofascore_lineups: Output of clean_sofascore_lineups()
+        sofascore_incidents: Output of clean_match_incidents() — optional,
+            defaults to None for backward compatibility
 
     Returns:
         Complete context dict passed directly to summarize_match()
     """
+    incidents = sofascore_incidents or {}
+
     return {
         "home_team": match_data.get("home_team", "Home Team"),
         "away_team": match_data.get("away_team", "Away Team"),
@@ -446,27 +564,63 @@ def build_match_context(match_data: dict, sofascore_stats: dict,
         "home_substitutes": sofascore_lineups.get("home_substitutes", []),
         "away_substitutes": sofascore_lineups.get("away_substitutes", []),
         "lineups_confirmed": sofascore_lineups.get("confirmed", False),
+        # Events — new in this version
+        "goals": incidents.get("goals", []),
+        "cards": incidents.get("cards", []),
+        "substitutions": incidents.get("substitutions", []),
+        "events_text": incidents.get("events_text", ""),
     }
 
 
 # -------------------------------------------------------------------------
-# Quick test
+# Quick test — verify cleaner functions work correctly
 # -------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    sample_match = {
-        "id": 419884,
-        "utcDate": "2024-01-15T20:00:00Z",
-        "status": "FINISHED",
-        "matchday": 21,
+    print("Testing cleaner functions...\n")
+
+    raw_comp = {"id": 2021, "name": "Premier League", "code": "PL",
+                "area": {"name": "England"}}
+    print(f"Competition: {clean_competition(raw_comp)}")
+
+    raw_team = {"id": 65, "name": "Manchester City FC",
+                "shortName": "Man City", "tla": "MCI"}
+    print(f"Team: {clean_team(raw_team)}")
+
+    raw_match = {
+        "id": 419884, "utcDate": "2024-01-15T20:00:00Z",
+        "status": "FINISHED", "matchday": 21,
         "homeTeam": {"id": 57, "name": "Arsenal FC",
                      "shortName": "Arsenal", "tla": "ARS"},
         "awayTeam": {"id": 65, "name": "Manchester City FC",
                      "shortName": "Man City", "tla": "MCI"},
         "score": {"fullTime": {"home": 1, "away": 0}}
     }
+    print(f"Match: {clean_match(raw_match, competition_id=2021)}")
 
-    cleaned = clean_match(sample_match, competition_id=2021)
-    print("Cleaned match:")
-    for key, value in cleaned.items():
-        print(f"  {key}: {value}")
+    # Test clean_match_incidents with sample data matching real structure
+    sample_incidents = {
+        "incidents": [
+            {"incidentType": "goal", "time": 78, "isHome": True,
+             "incidentClass": "regular",
+             "player": {"name": "Rodrigo Gomes"},
+             "assist1": {"name": "Tolu Arokodare"}},
+            {"incidentType": "card", "time": 69, "isHome": True,
+             "incidentClass": "yellow", "reason": "Foul",
+             "player": {"name": "João Gomes"}},
+            {"incidentType": "card", "time": 22, "isHome": False,
+             "incidentClass": "yellow", "reason": "Foul",
+             "player": {"name": "Ryan Gravenberch"}},
+            {"incidentType": "period", "text": "HT"},
+        ],
+        "home": {}, "away": {}
+    }
+    result = clean_match_incidents(
+        sample_incidents,
+        home_team="Wolverhampton Wanderers",
+        away_team="Liverpool FC"
+    )
+    print(f"\nGoals: {result['goals']}")
+    print(f"Cards: {result['cards']}")
+    print(f"\nEvents text:\n{result['events_text']}")
+    print("\nAll cleaner tests passed.")

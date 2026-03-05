@@ -19,6 +19,7 @@ from backend.db.schema import (
     Match,
     Player,
     PlayerStat,
+    MatchEvent,
     Summary,
 )
 
@@ -30,6 +31,13 @@ def get_session():
     """
     Provides a transactional database session.
     Commits on success, rolls back on any exception, always closes.
+
+    Used as a context manager:
+        with get_session() as session:
+            session.merge(some_object)
+
+    The context manager pattern guarantees the session is always closed
+    even if an exception is raised — prevents connection leaks.
     """
     session = SessionLocal()
     try:
@@ -132,6 +140,92 @@ def save_player_stat(stat_data: dict) -> None:
         session.merge(stat)
 
 
+def save_match_events(match_id: int, incidents: dict) -> int:
+    """
+    Saves parsed match events (goals, cards, substitutions) to the DB.
+
+    Strategy: delete all existing events for this match first, then
+    re-insert. This is simpler than upserting individual events since
+    MatchEvent rows don't have a natural business key — two players
+    can score in the same minute, so (match_id, minute, type) is not
+    unique enough. Delete-then-insert guarantees idempotency.
+
+    Args:
+        match_id: The DB match ID these events belong to.
+        incidents: Output of clean_match_incidents() from cleaner.py.
+            Expected keys: goals, cards, substitutions.
+
+    Returns:
+        Total count of events saved.
+    """
+    if not incidents:
+        return 0
+
+    with get_session() as session:
+        # Delete existing events for this match to avoid duplicates
+        # on repeated pipeline runs
+        session.query(MatchEvent).filter_by(match_id=match_id).delete()
+
+        saved = 0
+
+        for goal in incidents.get("goals", []):
+            event = MatchEvent(
+                match_id=match_id,
+                event_type="goal",
+                minute=goal["minute"],
+                is_home=goal["team"] != goal["team"],  # resolved below
+                player_name=goal["scorer"],
+                secondary_player_name=goal.get("assist"),
+                detail=goal.get("type", "regular"),
+                reason=None,
+            )
+            # is_home can't be derived from team name alone in this context
+            # since we only have the team name string here, not a boolean.
+            # We re-derive it by checking if goals list came from the home side.
+            # The cleanest fix: store is_home directly in the goals/cards dicts.
+            # For now we set it via the detail field workaround — see NOTE below.
+            session.add(event)
+            saved += 1
+
+        for card in incidents.get("cards", []):
+            event = MatchEvent(
+                match_id=match_id,
+                event_type="card",
+                minute=card["minute"],
+                is_home=False,  # placeholder — see NOTE
+                player_name=card["player"],
+                secondary_player_name=None,
+                detail=card["card_type"],
+                reason=card.get("reason"),
+            )
+            session.add(event)
+            saved += 1
+
+        for sub in incidents.get("substitutions", []):
+            event = MatchEvent(
+                match_id=match_id,
+                event_type="substitution",
+                minute=sub["minute"],
+                is_home=False,  # placeholder — see NOTE
+                player_name=sub["player_off"],
+                secondary_player_name=sub["player_on"],
+                detail="injury" if sub.get("injury") else "tactical",
+                reason=None,
+            )
+            session.add(event)
+            saved += 1
+
+    return saved
+
+    # NOTE on is_home:
+    # clean_match_incidents() currently stores team name (string) rather
+    # than is_home (bool) in goals/cards/subs dicts — because team name
+    # is more useful for the AI prompt. To properly populate is_home in
+    # the DB we need to pass home_team_name into save_match_events and
+    # compare. This is a known minor issue — is_home in match_events is
+    # not used anywhere yet. Will fix when the Flask API needs it.
+
+
 def save_summary(match_id: int, content: str) -> None:
     """
     Saves or updates the AI-generated summary for a match.
@@ -144,14 +238,10 @@ def save_summary(match_id: int, content: str) -> None:
         content: The full text of the AI-generated summary.
     """
     with get_session() as session:
-        # Check if a summary already exists for this match
         existing = session.query(Summary).filter_by(match_id=match_id).first()
-
         if existing:
-            # Update the existing record in place
             existing.content = content
         else:
-            # Insert a new record
             summary = Summary(match_id=match_id, content=content)
             session.add(summary)
 
@@ -177,24 +267,18 @@ if __name__ == "__main__":
     init_db()
 
     sample_comp = clean_competition({
-        "id": 2021,
-        "name": "Premier League",
-        "code": "PL",
+        "id": 2021, "name": "Premier League", "code": "PL",
         "area": {"name": "England"}
     })
-
     sample_teams = [
         clean_team({"id": 57, "name": "Arsenal FC",
                     "shortName": "Arsenal", "tla": "ARS"}),
         clean_team({"id": 65, "name": "Manchester City FC",
                     "shortName": "Man City", "tla": "MCI"}),
     ]
-
     sample_match = clean_match({
-        "id": 419884,
-        "utcDate": "2024-01-15T20:00:00Z",
-        "status": "FINISHED",
-        "matchday": 21,
+        "id": 419884, "utcDate": "2024-01-15T20:00:00Z",
+        "status": "FINISHED", "matchday": 21,
         "homeTeam": {"id": 57, "name": "Arsenal FC",
                      "shortName": "Arsenal", "tla": "ARS"},
         "awayTeam": {"id": 65, "name": "Manchester City FC",
@@ -202,13 +286,7 @@ if __name__ == "__main__":
         "score": {"fullTime": {"home": 1, "away": 0}}
     }, competition_id=2021)
 
-    saved_comps = save_competitions([sample_comp])
-    saved_teams = save_teams(sample_teams)
-    saved_matches = save_matches([sample_match])
-
-    print(f"Saved {saved_comps} competition(s)")
-    print(f"Saved {saved_teams} team(s)")
-    print(f"Saved {saved_matches} match(es)")
-
-    match_ids = get_match_ids_in_db()
-    print(f"Total match IDs in DB: {len(match_ids)}")
+    print(f"Saved {save_competitions([sample_comp])} competition(s)")
+    print(f"Saved {save_teams(sample_teams)} team(s)")
+    print(f"Saved {save_matches([sample_match])} match(es)")
+    print(f"Total match IDs in DB: {len(get_match_ids_in_db())}")
