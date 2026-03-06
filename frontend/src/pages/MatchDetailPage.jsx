@@ -1,21 +1,3 @@
-// src/pages/MatchDetailPage.jsx
-//
-// Shows full analysis for a single match.
-// URL: /matches/:id
-//
-// NEW HOOK: useParams()
-// Reads URL parameters defined in the Route path.
-// Route path="/matches/:id" → useParams() returns { id: "123" }
-// This is how the component knows WHICH match to fetch.
-//
-// We make TWO parallel API calls using Promise.all():
-//   GET /api/matches/:id/summary — AI analysis text
-//   GET /api/matches/:id/events  — goals, cards, subs
-//
-// Promise.all([p1, p2]) waits for BOTH promises to resolve,
-// then returns [result1, result2]. This is faster than two
-// sequential awaits because both requests run simultaneously.
-
 import { useState, useEffect } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import apiClient from '../api/client'
@@ -30,34 +12,24 @@ function formatDate(dateStr) {
 }
 
 function MatchDetailPage() {
-  // useParams reads :id from the URL
   const { id } = useParams()
-
-  const [match, setMatch] = useState(null)
+  const [match,   setMatch]   = useState(null)
   const [summary, setSummary] = useState(null)
-  const [events, setEvents] = useState([])
+  const [events,  setEvents]  = useState([])
   const [loading, setLoading] = useState(true)
-  const [error, setError] = useState(null)
+  const [error,   setError]   = useState(null)
 
   useEffect(() => {
     const fetchMatchData = async () => {
       try {
-        // Promise.all — runs all three requests simultaneously.
-        // Much faster than three sequential awaits.
-        // If ANY promise rejects, the whole Promise.all rejects immediately.
         const [matchRes, summaryRes, eventsRes] = await Promise.all([
           apiClient.get(`/api/matches/${id}`),
-          apiClient.get(`/api/matches/${id}/summary`).catch(() => ({ data: { summary: null } })),
-          apiClient.get(`/api/matches/${id}/events`).catch(() => ({ data: [] })),
+          apiClient.get(`/api/matches/${id}/summary`).catch(() => ({ data: {} })),
+          apiClient.get(`/api/matches/${id}/events`).catch(() => ({ data: { events: [] } })),
         ])
-        // Note: summary and events use .catch() individually so a missing
-        // summary doesn't crash the entire page. Graceful degradation —
-        // same principle as your backend scrapers.
-
         setMatch(matchRes.data)
         setSummary(summaryRes.data.content || null)
         setEvents(eventsRes.data.events || [])
-
       } catch (err) {
         console.error('Failed to load match:', err)
         setError('Could not load match data.')
@@ -65,19 +37,14 @@ function MatchDetailPage() {
         setLoading(false)
       }
     }
-
     fetchMatchData()
-  }, [id]) // id in dependency array — if URL changes, re-fetch
-
-  // --- RENDER STATES ---
+  }, [id])
 
   if (loading) {
     return (
-      <div className="max-w-5xl mx-auto px-6 py-12">
-        <div className="flex items-center gap-3 text-chalk-400">
-          <span className="inline-block w-5 h-5 border-2 border-chalk-400 border-t-transparent rounded-full animate-spin" />
-          <span>Loading match...</span>
-        </div>
+      <div className="max-w-5xl mx-auto px-6 py-12 flex items-center gap-3 text-textmuted">
+        <span className="w-4 h-4 border-2 border-textmuted border-t-transparent rounded-full animate-spin inline-block" />
+        <span className="font-condensed tracking-widest uppercase text-xs">Loading match...</span>
       </div>
     )
   }
@@ -85,9 +52,9 @@ function MatchDetailPage() {
   if (error || !match) {
     return (
       <div className="max-w-5xl mx-auto px-6 py-12">
-        <div className="bg-red-950/50 border border-red-800 rounded-lg p-6">
-          <p className="text-red-400">{error || 'Match not found.'}</p>
-          <Link to="/" className="text-grass-400 text-sm mt-2 block hover:underline">
+        <div className="border border-red/30 bg-fkred/5 p-6">
+          <p className="text-fkred font-condensed">{error || 'Match not found.'}</p>
+          <Link to="/" className="text-fkgreenbrighttext-sm mt-2 block font-condensed hover:underline">
             ← Back to all matches
           </Link>
         </div>
@@ -98,70 +65,71 @@ function MatchDetailPage() {
   return (
     <div className="max-w-5xl mx-auto px-6 py-8">
 
-      {/* Back link */}
-      <Link
-        to="/"
-        className="text-chalk-400 text-sm hover:text-grass-400 transition-colors mb-6 block"
-      >
-        ← All matches
+      <Link to="/" className="font-condensed text-xs text-textmuted hover:text-fkgreenbrighttransition-colors tracking-widest uppercase mb-6 block">
+        ← All Matches
       </Link>
 
-      {/* Match header card */}
-      <div className="bg-card border border-pitch-800 rounded-lg p-8 mb-8">
+      {/* Hero scoreboard */}
+      <div className="bg-surface border border-bdr relative overflow-hidden mb-0">
+        {/* Gradient accent bar */}
+        <div className="absolute top-0 left-0 right-0 h-1"
+          style={{ background: 'linear-gradient(90deg, #1a5c35 0%, #2da050 40%, #e8960e 70%, #c8102e 100%)' }}
+        />
 
-        {/* Competition + date */}
-        <div className="flex items-center justify-between mb-6">
-          <span className="text-grass-400 text-sm font-medium uppercase tracking-wider">
-            {match.competition}
-            {match.matchday && <span className="text-chalk-400"> · MD {match.matchday}</span>}
-          </span>
-          <span className="text-chalk-400 text-sm">{formatDate(match.utc_date)}</span>
-        </div>
-
-        {/* Score display */}
-        <div className="flex items-center justify-center gap-8">
-
-          <div className="flex-1 text-right">
-            <h2 className="text-chalk-100 text-xl font-medium">{match.home_team}</h2>
-            <p className="text-chalk-400 text-xs mt-1">Home</p>
+        <div className="p-8 pt-9">
+          {/* Competition + date */}
+          <div className="flex items-center justify-between mb-6">
+            <span className="font-condensed text-xs font-bold tracking-widest uppercase text-fkgreenbright">
+              {match.competition}
+              {match.matchday && (
+                <span className="text-textmuted"> · MD {match.matchday}</span>
+              )}
+            </span>
+            <span className="font-condensed text-xs text-textmuted">
+              {formatDate(match.date)}
+            </span>
           </div>
 
-          <div className="text-center shrink-0">
-            <div className="flex items-center gap-2">
-              <span className="font-display text-6xl text-chalk-100">
-                {match.home_score ?? '-'}
-              </span>
-              <span className="font-display text-4xl text-pitch-800 mx-1">:</span>
-              <span className="font-display text-6xl text-chalk-100">
-                {match.away_score ?? '-'}
-              </span>
+          {/* Score */}
+          <div className="grid items-center gap-8" style={{ gridTemplateColumns: '1fr auto 1fr' }}>
+            <div className="text-right">
+              <p className="font-condensed text-2xl font-bold text-textprimary leading-tight">
+                {match.home_team}
+              </p>
+              <p className="font-condensed text-xs text-textmuted tracking-widest uppercase mt-1">Home</p>
             </div>
-            <p className="text-chalk-400 text-xs mt-1 uppercase tracking-widest">
-              Full Time
-            </p>
-          </div>
 
-          <div className="flex-1 text-left">
-            <h2 className="text-chalk-100 text-xl font-medium">{match.away_team}</h2>
-            <p className="text-chalk-400 text-xs mt-1">Away</p>
-          </div>
+            <div className="text-center">
+              <div className="flex items-center gap-2">
+                <span className="font-display text-8xl text-textprimary leading-none">
+                  {match.home_score ?? '-'}
+                </span>
+                <span className="font-display text-5xl text-bdrlt">–</span>
+                <span className="font-display text-8xl text-textprimary leading-none">
+                  {match.away_score ?? '-'}
+                </span>
+              </div>
+              <p className="font-condensed text-xs text-textmuted tracking-widest uppercase mt-1">
+                Full Time
+              </p>
+            </div>
 
+            <div className="text-left">
+              <p className="font-condensed text-2xl font-bold text-textprimary leading-tight">
+                {match.away_team}
+              </p>
+              <p className="font-condensed text-xs text-textmuted tracking-widest uppercase mt-1">Away</p>
+            </div>
+          </div>
         </div>
       </div>
 
-      {/* Two-column layout on larger screens — events left, summary right */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-
-        {/* Events column — narrower */}
-        <div className="lg:col-span-1">
-          <EventsTimeline events={events} />
+      {/* Two column layout — events narrow, analysis wide */}
+      <div className="grid gap-0 mt-6" style={{ gridTemplateColumns: '300px 1fr' }}>
+        <EventsTimeline events={events} />
+        <div className="border-l border-bdr">
+          <SummaryPanel summary={summary} showHeadline={true} />
         </div>
-
-        {/* Summary column — wider */}
-        <div className="lg:col-span-2">
-          <SummaryPanel summary={summary} />
-        </div>
-
       </div>
 
     </div>

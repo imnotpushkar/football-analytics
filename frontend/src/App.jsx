@@ -26,20 +26,24 @@ import { BrowserRouter, Routes, Route } from 'react-router-dom'
 import MatchesPage from './pages/MatchesPage'
 import MatchDetailPage from './pages/MatchDetailPage'
 import Navbar from './components/Navbar'
+import Ticker from './components/Ticker'
 
 function App() {
   return (
     <BrowserRouter>
-      {/* Navbar renders on every page — it's outside <Routes> */}
       <Navbar />
 
-      {/* Main content area — shifts down to account for fixed navbar */}
-      <main className="pt-16 min-h-screen bg-pitch-950">
-        <Routes>
-          <Route path="/" element={<MatchesPage />} />
-          <Route path="/matches/:id" element={<MatchDetailPage />} />
-        </Routes>
-      </main>
+      {/* Content pushed down by navbar (64px = pt-16) */}
+      <div className="pt-16 min-h-screen bg-bg flex flex-col">
+        <Ticker />
+        <main className="flex-1">
+          <Routes>
+            <Route path="/" element={<MatchesPage />} />
+            <Route path="/matches/:id" element={<MatchDetailPage />} />
+          </Routes>
+        </main>
+      </div>
+
     </BrowserRouter>
   )
 }

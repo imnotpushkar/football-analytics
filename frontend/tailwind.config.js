@@ -1,42 +1,39 @@
 /** @type {import('tailwindcss').Config} */
 export default {
-  // content: tells Tailwind WHERE to look for class names.
-  // Tailwind scans these files at build time and only includes
-  // CSS for classes it actually finds. This keeps the final
-  // CSS bundle small — unused classes are never generated.
   content: [
     "./index.html",
-    "./src/**/*.{js,ts,jsx,tsx}",  // ** = any subdirectory, *.{} = any of these extensions
+    "./src/**/*.{js,ts,jsx,tsx}",
   ],
   theme: {
     extend: {
-      // extend lets you ADD to Tailwind's defaults without replacing them.
-      // We define our own design tokens here as CSS custom properties.
       colors: {
-        pitch: {
-          950: '#0a0f0a',   // near-black green — main background
-          900: '#0d1410',   // dark green — card backgrounds
-          800: '#152018',   // slightly lighter — borders, hover states
-        },
-        grass: {
-          400: '#4ade80',   // bright green — primary accent, scores
-          500: '#22c55e',   // medium green — secondary accent
-        },
-        chalk: {
-          100: '#f0f4f0',   // near-white — primary text
-          400: '#9ca89c',   // muted — secondary text, dates
-        },
-        card: {
-          DEFAULT: '#121a12',  // card base background
-          hover: '#1a241a',    // card hover state
-        }
+        bg:       '#100e0b',
+        surface:  '#181410',
+        surface2: '#1e1a15',
+        surface3: '#231f19',
+
+        // Renamed — 'border' and 'green' clash with Tailwind built-ins
+        bdr:      '#2e2820',   // was: border
+        bdrlt:    '#3d3528',   // was: borderlt
+
+        textprimary:   '#ede8e0',
+        textsecondary: '#9c9080',
+        textmuted:     '#5a5040',
+
+        // Renamed — 'green' clashes with Tailwind's green scale
+        fkgreen:       '#1a5c35',   // was: green
+        fkgreenmid:    '#22773f',   // was: greenmid
+        fkgreenlight:  '#2da050',   // was: greenlight
+        fkgreenbright: '#45c466',   // was: greenbright
+
+        fkred:         '#c8102e',   // was: red (also clashes)
+        fkamber:       '#c8780a',   // was: amber
+        fkamberbright: '#e8960e',   // was: amberbright
       },
       fontFamily: {
-        // We use two fonts:
-        // - 'Bebas Neue': condensed display font for scores, headings — football scoreboard feel
-        // - 'DM Sans': clean, modern body font — readable at small sizes
-        display: ['Bebas Neue', 'sans-serif'],
-        body: ['DM Sans', 'sans-serif'],
+        display:   ['Bebas Neue', 'sans-serif'],
+        body:      ['Barlow', 'sans-serif'],
+        condensed: ['Barlow Condensed', 'sans-serif'],
       },
     },
   },
