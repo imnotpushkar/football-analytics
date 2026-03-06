@@ -55,8 +55,8 @@ function MatchDetailPage() {
         // same principle as your backend scrapers.
 
         setMatch(matchRes.data)
-        setSummary(summaryRes.data.summary || null)
-        setEvents(eventsRes.data)
+        setSummary(summaryRes.data.content || null)
+        setEvents(eventsRes.data.events || [])
 
       } catch (err) {
         console.error('Failed to load match:', err)
