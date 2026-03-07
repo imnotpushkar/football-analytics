@@ -8,31 +8,29 @@
 //   risk). They are original SVG designs that evoke the competition
 //   through colour and shape only.
 //
-//   PL  — purple/lion motif hex
-//   CL  — navy/gold star
-//   PD  — orange/red geometric La Liga shape
-//   BL1 — red/white Bundesliga circle
-//   SA  — black/blue Serie A shield
+// NAMING:
+//   Nav links and the pipeline button show full competition names
+//   ("Premier League", "La Liga") not internal API codes ("PL", "PD").
+//   API codes are internal identifiers from Football-Data.org — users
+//   have no reason to know them. Full names are shown everywhere in the UI.
+//   The code field is kept in COMPETITION_LINKS for API calls only.
 //
 // ACTIVE STATE:
 //   useLocation() from React Router returns the current URL path.
 //   We compare path to each link's href to apply active styling.
-//   This is the standard pattern — no extra state needed.
 //
-// RESPONSIVE BEHAVIOUR:
-//   On mobile (< md breakpoint) the competition links collapse.
-//   Only the wordmark and pipeline button remain visible.
-//   A hamburger menu is not implemented — acceptable for a dev tool.
+// PIPELINE BUTTON + COMPETITION CONTEXT:
+//   We derive activeCode and activeLabel from the current pathname
+//   and pass both to PipelineButton:
+//     competition = API code  → sent in POST body
+//     label       = full name → shown on button and status message
 
 import { Link, useLocation } from 'react-router-dom'
 import PipelineButton from './PipelineButton'
 
 // ── Competition badge SVGs ────────────────────────────────────────────────
-// Each badge is a small 24×24 SVG. They use competition colours but are
-// original geometric designs — not reproductions of official logos.
 
 function PLBadge() {
-  // Purple hexagon — Premier League colour palette
   return (
     <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
       <polygon
@@ -53,11 +51,9 @@ function PLBadge() {
 }
 
 function CLBadge() {
-  // Navy circle with gold star — Champions League colours
   return (
     <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
       <circle cx="10" cy="10" r="9" fill="#001a4e" stroke="#c9a84c" strokeWidth="1.2"/>
-      {/* 8-pointed star */}
       <polygon
         points="10,3 11.2,8 16,7 12.5,10.5 16,14 11.2,12 10,17 8.8,12 4,14 7.5,10.5 4,7 8.8,8"
         fill="#c9a84c"
@@ -68,7 +64,6 @@ function CLBadge() {
 }
 
 function LaLigaBadge() {
-  // Orange/red geometric — La Liga colours
   return (
     <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
       <rect x="1" y="1" width="18" height="18" rx="3" fill="#ee8000" />
@@ -79,7 +74,6 @@ function LaLigaBadge() {
 }
 
 function BundesligaBadge() {
-  // Red circle — Bundesliga colours
   return (
     <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
       <circle cx="10" cy="10" r="9" fill="#d20515" stroke="#ffffff" strokeWidth="1.2"/>
@@ -90,7 +84,6 @@ function BundesligaBadge() {
 }
 
 function SerieABadge() {
-  // Black/blue shield — Serie A colours
   return (
     <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
       <path
@@ -111,21 +104,33 @@ function SerieABadge() {
 }
 
 // ── Competition nav links config ──────────────────────────────────────────
+// code:  API identifier — sent to Football-Data.org and Flask backend.
+//        Never shown in the UI. Must not change.
+// label: Human-readable name — shown in nav links and pipeline button.
+//        Safe to update without touching any backend code.
 
 const COMPETITION_LINKS = [
-  { href: '/',                 label: 'PL',  Badge: PLBadge,         title: 'Premier League'        },
-  { href: '/champions-league', label: 'UCL', Badge: CLBadge,         title: 'Champions League'      },
-  { href: '/la-liga',          label: 'PD',  Badge: LaLigaBadge,     title: 'La Liga'               },
-  { href: '/bundesliga',       label: 'BL1', Badge: BundesligaBadge, title: 'Bundesliga'            },
-  { href: '/serie-a',          label: 'SA',  Badge: SerieABadge,     title: 'Serie A'               },
+  { href: '/',                 code: 'PL',  label: 'Premier League',   Badge: PLBadge         },
+  { href: '/champions-league', code: 'CL',  label: 'Champions League', Badge: CLBadge         },
+  { href: '/la-liga',          code: 'PD',  label: 'La Liga',          Badge: LaLigaBadge     },
+  { href: '/bundesliga',       code: 'BL1', label: 'Bundesliga',       Badge: BundesligaBadge },
+  { href: '/serie-a',          code: 'SA',  label: 'Serie A',          Badge: SerieABadge     },
 ]
 
 // ── Navbar component ──────────────────────────────────────────────────────
 
 function Navbar() {
-  // useLocation() returns the current URL. We use pathname to determine
-  // which nav link is active. No extra state — React Router handles it.
   const { pathname } = useLocation()
+
+  // Derive active competition from current pathname.
+  // Used to pass the correct code + label to PipelineButton.
+  // Fallback to PL defaults if on a route that isn't a competition page
+  // (e.g. /matches/:id detail view — pipeline shouldn't be needed there).
+  const activeLink  = COMPETITION_LINKS.find(({ href }) =>
+    href === '/' ? pathname === '/' : pathname.startsWith(href)
+  )
+  const activeCode  = activeLink?.code  ?? 'PL'
+  const activeLabel = activeLink?.label ?? 'Premier League'
 
   return (
     <nav className="fixed top-0 left-0 right-0 z-50 bg-surface border-b border-bdr">
@@ -144,24 +149,17 @@ function Navbar() {
         </Link>
 
         {/* ── Competition links — hidden on mobile ── */}
-        {/*
-          hidden md:flex — Tailwind responsive prefix.
-          On screens < 768px (md breakpoint), display:none.
-          On screens >= 768px, display:flex.
-          This prevents the navbar overflowing on small screens.
-        */}
         <div className="hidden md:flex items-center gap-1">
-          {COMPETITION_LINKS.map(({ href, label, Badge, title }) => {
-            // Active if pathname exactly matches (home) or starts with (sub-routes)
+          {COMPETITION_LINKS.map(({ href, code, label, Badge }) => {
             const isActive = href === '/'
               ? pathname === '/'
               : pathname.startsWith(href)
 
             return (
               <Link
-                key={href}
+                key={code}
                 to={href}
-                title={title}
+                title={label}
                 className={`
                   flex items-center gap-2 px-3 py-1.5 rounded
                   font-condensed text-xs font-bold tracking-widest uppercase
@@ -180,8 +178,13 @@ function Navbar() {
         </div>
 
         {/* ── Pipeline button ── */}
+        {/*
+          Passes both the API code (competition) and the display name (label).
+          PipelineButton sends the code to the backend and shows the label
+          to the user — these two concerns are intentionally kept separate.
+        */}
         <div className="shrink-0">
-          <PipelineButton />
+          <PipelineButton competition={activeCode} label={activeLabel} />
         </div>
 
       </div>
