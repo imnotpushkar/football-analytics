@@ -26,18 +26,17 @@ HALLUCINATION PREVENTION:
     - Explicitly listing every player with their role
     - Including a structured events_text block with actual goals/cards
     - Instructing the model to only reference players from the provided list
+    - Explicitly forbidding the model from overriding formation data
     - One-player-per-line format for the Players section enforces specificity
 
-FUNCTIONS:
-    summarize_match(context) -> str
-        Main entry point. Takes a context dict built by
-        build_match_context() in cleaner.py. Returns summary string.
-
-    _build_system_prompt() -> str
-        Returns the static system prompt defining output style.
-
-    _build_user_prompt(context) -> str
-        Builds the dynamic user prompt from match context data.
+WHY FEW-SHOT EXAMPLES WERE NOT USED:
+    Few-shot prompting (including worked examples in the prompt) costs
+    300-500 tokens per example on every API call. With a 100k/day budget
+    and ~2300 tokens per match, adding two examples would reduce our
+    daily match capacity from ~43 to ~30. The formation problem is better
+    solved by a stronger constraint instruction (zero token overhead)
+    than by examples. Few-shot is appropriate when the output FORMAT
+    needs demonstrating — not when the issue is ignoring provided data.
 """
 
 import os
@@ -46,23 +45,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ---------------------------------------------------------------------------
-# Client initialisation
-# ---------------------------------------------------------------------------
 
 def _get_client() -> Groq:
     """
     Creates and returns a Groq API client.
-
-    WHY A FUNCTION INSTEAD OF A MODULE-LEVEL VARIABLE:
-        If we wrote `client = Groq(api_key=...)` at module level,
-        the client would be created at import time. If the .env file
-        isn't loaded yet or the key is missing, it silently creates
-        a broken client. A factory function fails loudly and late —
-        only when actually called — which is easier to debug.
-
-    Raises:
-        ValueError if GROQ_API_KEY is not set in environment.
+    Factory function — fails loudly only when called, not at import time.
     """
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
@@ -73,22 +60,16 @@ def _get_client() -> Groq:
     return Groq(api_key=api_key)
 
 
-# ---------------------------------------------------------------------------
-# Prompt builders
-# ---------------------------------------------------------------------------
-
 def _build_system_prompt() -> str:
     """
     Returns the static system prompt.
 
-    This is the instruction layer — it tells the model WHO it is
-    and HOW to write. It never changes between matches.
-
-    The style target is Tifo Football / The Athletic:
-    - Tactical vocabulary (halfspace, pivot, zone 14, pressing)
-    - Opinionated — takes a position on what happened
-    - Stats as evidence, not decoration
-    - Events (goals, cards) as anchors for the narrative
+    Session 15 change: Added explicit formation authority rule.
+    The model was overriding provided formation data with its own
+    training knowledge (e.g. writing 4-3-3 for Barcelona when the
+    data said 4-2-3-1). The fix is a strong explicit constraint —
+    the provided FORMATIONS block is ground truth and must not be
+    changed or reinterpreted under any circumstances.
     """
     return """You are a football analyst writing for a premium football media outlet in the style of Tifo Football or The Athletic.
 
@@ -115,10 +96,12 @@ Only include players from the provided lineup. Do not invent players.
 ## THE VERDICT
 1-2 paragraphs. Who deserved to win and why? What does this result tell us about each team?
 
-CRITICAL RULES:
-- Never fabricate goals, assists, cards, or stats not provided
-- Only reference players explicitly listed in the lineups
-- Use the events block as the single source of truth for match incidents
+CRITICAL RULES — VIOLATION OF ANY OF THESE IS NOT ACCEPTABLE:
+- FORMATIONS ARE GROUND TRUTH. The formation strings in the FORMATIONS block (e.g. "4-2-3-1", "4-4-2") are the confirmed tactical setups. You must use them exactly as provided. Never substitute, infer, or correct them based on your training knowledge. If the data says 4-2-3-1, write 4-2-3-1 — not 4-3-3, not 4-1-4-1.
+- Never fabricate goals, assists, cards, or stats not provided in the match data
+- Only reference players explicitly listed in the lineups — never invent players
+- Use the MATCH EVENTS block as the sole source of truth for all match incidents
+- If a player name in the events is "Unknown", do not reference that event at all
 - Write in confident, declarative sentences — no hedging"""
 
 
@@ -126,18 +109,8 @@ def _build_user_prompt(context: dict) -> str:
     """
     Builds the dynamic user prompt from the match context dict.
 
-    The context dict comes from build_match_context() in cleaner.py.
-    We extract every useful field and structure it clearly so the
-    model has all the evidence it needs to write accurate analysis.
-
     Args:
-        context: Dict with keys:
-            home_team, away_team, home_score, away_score,
-            competition, matchday, date,
-            home_stats, away_stats, narrative_hints,
-            home_formation, away_formation,
-            home_players, away_players, lineups_confirmed,
-            goals, cards, substitutions, events_text
+        context: Dict with keys from build_match_context() in cleaner.py
 
     Returns:
         Formatted string to send as the user message.
@@ -163,25 +136,21 @@ def _build_user_prompt(context: dict) -> str:
 
     events_text = context.get("events_text", "No events data available.")
 
-    # --- Build stats block ---
-    # Only include stats that actually exist in both sides
+    # Build stats block
     stats_lines = []
     all_stat_keys = set(home_stats.keys()) | set(away_stats.keys())
     for key in sorted(all_stat_keys):
         h_val = home_stats.get(key, "N/A")
         a_val = away_stats.get(key, "N/A")
-        # Format key from snake_case to Title Case for readability
         label = key.replace("_", " ").title()
         stats_lines.append(f"  {label}: {h_val} vs {a_val}")
 
     stats_block = "\n".join(stats_lines) if stats_lines else "  No stats available."
 
-    # --- Build narrative hints block ---
     hints_block = "\n".join(
         f"  - {hint}" for hint in narrative_hints
     ) if narrative_hints else "  None."
 
-    # --- Build lineup blocks ---
     def format_players(players: list) -> str:
         if not players:
             return "  Not available."
@@ -199,7 +168,15 @@ def _build_user_prompt(context: dict) -> str:
     away_lineup_block = format_players(away_players)
     lineup_status = "confirmed" if lineups_confirmed else "unconfirmed"
 
-    # --- Assemble full prompt ---
+    # Repeat the formation constraint inline in the user prompt as well.
+    # Stating a rule in both the system prompt and the user prompt is a
+    # known technique for reducing LLM non-compliance — the model sees
+    # the constraint at two points in its context window.
+    formation_note = (
+        f"  IMPORTANT: These formations are confirmed data. "
+        f"Use them exactly. Do not change or reinterpret them."
+    )
+
     prompt = f"""MATCH: {home} {home_score} - {away_score} {away}
 COMPETITION: {competition} — Matchday {matchday}
 DATE: {date}
@@ -207,6 +184,7 @@ DATE: {date}
 FORMATIONS ({lineup_status}):
   {home}: {home_formation}
   {away}: {away_formation}
+{formation_note}
 
 MATCH EVENTS (source of truth — only reference these incidents):
 {events_text}
@@ -223,58 +201,35 @@ NARRATIVE HINTS FROM DATA:
 {away.upper()} LINEUP:
 {away_lineup_block}
 
-Write the full match analysis following the four-section format. Ground every claim in the events and stats provided above."""
+Write the full match analysis following the four-section format. Ground every claim in the events and stats provided above. Use the formations exactly as given."""
 
     return prompt
 
-
-# ---------------------------------------------------------------------------
-# Main entry point
-# ---------------------------------------------------------------------------
 
 def summarize_match(context: dict) -> str:
     """
     Generates a creator-quality match analysis using the Groq API.
 
-    Called by backend/main.py step_summarize() with a context dict
-    built by build_match_context() in cleaner.py.
-
-    HOW THE GROQ API CALL WORKS:
-        client.chat.completions.create() sends a request to Groq's
-        inference API. It follows the OpenAI Chat Completions format —
-        a list of messages with 'role' (system/user/assistant) and 'content'.
-
-        The response object has:
-            response.choices[0].message.content — the generated text
-            response.usage.total_tokens — how many tokens were used
-
-        Groq's free tier has rate limits (requests/minute, tokens/minute).
-        For a single pipeline run this is never an issue.
+    Temperature 0.7: good balance for analytical writing — some variation
+    but stays factual and structured. Lower values (0.3-0.5) would make
+    the output more deterministic but more repetitive across matches.
 
     Args:
         context: Match context dict from build_match_context()
 
     Returns:
         Generated summary string with four ## sections.
-
-    Raises:
-        Exception if Groq API call fails — caller handles gracefully.
     """
     client = _get_client()
 
     system_prompt = _build_system_prompt()
     user_prompt = _build_user_prompt(context)
 
-    # Temperature controls randomness:
-    # 0.0 = deterministic, always same output
-    # 1.0 = very creative/random
-    # 0.7 = good balance for analytical writing — some variation
-    # but stays factual and structured
     response = client.chat.completions.create(
         model="llama-3.3-70b-versatile",
         messages=[
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
+            {"role": "user",   "content": user_prompt},
         ],
         temperature=0.7,
         max_tokens=1500,
@@ -282,9 +237,7 @@ def summarize_match(context: dict) -> str:
 
     summary = response.choices[0].message.content
 
-    # Basic post-processing — strip leading/trailing whitespace
-    # The model sometimes adds preamble before the first ## header
-    # We trim anything before the first ## to enforce clean output
+    # Strip anything before the first ## header — model sometimes adds preamble
     if "##" in summary:
         first_header = summary.index("##")
         summary = summary[first_header:].strip()
