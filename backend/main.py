@@ -11,8 +11,35 @@ Orchestrates the full pipeline for any supported competition:
        a. Fetch SofaScore stats and lineups
        b. Fetch SofaScore incidents (goals, cards, subs)
        c. Generate AI summary via Groq
-       d. Save summary, events, and match stats to DB   ← updated
+       d. Save summary, events, and match stats to DB
     6. Sleep 3s between matches to respect Groq rate limits
+
+PROGRESS CALLBACK (added this session):
+
+    run_pipeline() now accepts an optional progress_callback parameter.
+    This is a function that the pipeline calls at key moments to report
+    what it's doing. The callback signature is:
+
+        progress_callback(event: str, data: dict)
+
+    Events fired:
+        "total_found"  — how many unanalysed matches were found
+        "match_start"  — about to start processing a specific match
+        "match_done"   — a match finished (ok or error)
+        "up_to_date"   — no unanalysed matches found
+        "complete"     — all matches processed
+
+    WHY A CALLBACK AND NOT A DIRECT IMPORT:
+        main.py should not know anything about Flask or HTTP.
+        Injecting a callback keeps main.py reusable — it can be called
+        from the CLI (no callback), from routes.py (with callback),
+        or from tests (with a mock callback). This is called
+        "dependency injection" — behaviour is passed in, not hardcoded.
+
+    WHY NOT JUST WRITE TO _pipeline_progress DIRECTLY:
+        main.py would then depend on routes.py, creating a circular import.
+        routes.py imports from main.py — if main.py imported back from
+        routes.py, Python would fail with an ImportError at startup.
 
 CLI USAGE:
 
@@ -42,6 +69,7 @@ import sys
 import time
 import argparse
 from datetime import datetime
+from typing import Callable, Optional
 
 from backend.db.schema import init_db, Summary
 from backend.db.writer import (
@@ -88,9 +116,6 @@ COMPETITIONS = {
 
 DEFAULT_COMPETITION = "PL"
 
-# Seconds to wait between Groq API calls.
-# Groq free tier: 30 req/min, 6000 tokens/min on llama-3.3-70b.
-# Each summary ~2300 tokens. 3s gap keeps us safely within limits.
 GROQ_DELAY_SECONDS = 3
 
 
@@ -110,10 +135,6 @@ def step_fetch_and_store(competition_code: str,
     """
     Step 2: Fetch all matches for a competition from Football-Data.org.
     Saves new competitions, teams, and matches to DB.
-    Skips matches already in DB — idempotent, safe to re-run.
-
-    Returns:
-        List of all raw match dicts from the API.
     """
     print(f"[2/5] Fetching matches for: {competition_code}...")
 
@@ -148,17 +169,7 @@ def step_fetch_and_store(competition_code: str,
 
 def step_get_unanalysed_matches(raw_matches: list,
                                 target_matchday: int | None = None) -> list:
-    """
-    Step 3: Find finished matches that need summarizing.
-
-    AUTO MODE (target_matchday=None):
-        Picks the most complete matchday by finished match count.
-
-    BACKFILL MODE (target_matchday=N):
-        Directly targets matchday N.
-
-    Both modes skip matches that already have summaries.
-    """
+    """Step 3: Find finished matches that need summarizing."""
     finished = [m for m in raw_matches if m.get("status") == "FINISHED"]
 
     if not finished:
@@ -313,26 +324,13 @@ def step_summarize(raw_match: dict, competition_name: str,
 
 def step_save(match_id: int, summary: str, incidents: dict,
               raw_match: dict, sofascore_data: dict):
-    """
-    Persist AI summary, match events, and team-level stats to DB.
-
-    WHY sofascore_data IS NOW PASSED HERE:
-        Previously step_save only received match_id, summary, incidents.
-        To save match_stats we need the cleaned stats dict from SofaScore
-        and the home/away team IDs from the raw match. Both are now passed
-        in so save_match_stats() has everything it needs.
-
-        This is a deliberate change to the function signature — any caller
-        must now pass raw_match and sofascore_data. The pipeline loop
-        already has both, so no structural change is needed there.
-    """
+    """Persist AI summary, match events, and team-level stats to DB."""
     save_summary(match_id, summary)
 
     if incidents:
         saved_events = save_match_events(match_id, incidents)
         print(f"      Saved {saved_events} event(s) to DB.")
 
-    # Save team-level stats if SofaScore data was available for this match
     if sofascore_data and sofascore_data.get("stats"):
         cleaned_stats = sofascore_data["stats"]
         match_team_ids = {
@@ -353,19 +351,29 @@ def run_pipeline(
     competition_id: int = None,
     competition_name: str = None,
     target_matchday: int | None = None,
+    progress_callback: Optional[Callable] = None,
 ) -> list:
     """
     Runs the full ETL + summarization pipeline for a competition.
 
     Args:
-        competition_code:  e.g. "PL", "CL", "PD"
-        competition_id:    numeric DB id — looked up if None
-        competition_name:  human name for AI prompt — looked up if None
-        target_matchday:   specific matchday to process, or None for auto
+        competition_code:   e.g. "PL", "CL", "PD"
+        competition_id:     numeric DB id — looked up if None
+        competition_name:   human name for AI prompt — looked up if None
+        target_matchday:    specific matchday to process, or None for auto
+        progress_callback:  optional fn(event, data) for live progress reporting
+                            Pass None when running from CLI — no-op.
 
     Returns:
         List of result dicts — one per match attempted.
     """
+    # Helper: fire callback safely — if no callback is set, do nothing.
+    # Using a helper means every call site is clean: _cb("event", {...})
+    # instead of: if progress_callback: progress_callback("event", {...})
+    def _cb(event: str, data: dict):
+        if progress_callback:
+            progress_callback(event, data)
+
     if competition_code not in COMPETITIONS:
         raise ValueError(
             f"Unknown competition code: {competition_code}. "
@@ -391,6 +399,7 @@ def run_pipeline(
     raw_matches = step_fetch_and_store(competition_code, competition_id)
     if not raw_matches:
         print("No matches returned from API. Exiting.")
+        _cb("up_to_date", {})
         return []
 
     unanalysed = step_get_unanalysed_matches(raw_matches, target_matchday)
@@ -398,10 +407,16 @@ def run_pipeline(
         md_label = f"MD{target_matchday}" if target_matchday else "the most complete matchday"
         print(f"All matches from {md_label} are already analysed.")
         print("Nothing to do.\n")
+        # Fire up_to_date — frontend will show "seems up-to-date"
+        _cb("up_to_date", {})
+        _cb("complete", {})
         return []
 
     total = len(unanalysed)
     print(f"[4/5] Processing {total} match(es)...\n")
+
+    # Tell the frontend how many matches we found
+    _cb("total_found", {"total": total})
 
     results = []
 
@@ -412,6 +427,14 @@ def run_pipeline(
 
         print(f"  [{i}/{total}] {home} vs {away} (ID: {match_id})")
 
+        # Tell the frontend which match is starting and what index it is
+        _cb("match_start", {
+            "index": i,
+            "total": total,
+            "home":  home,
+            "away":  away,
+        })
+
         try:
             sofascore_data = step_fetch_sofascore_data(raw_match)
             incidents = step_fetch_incidents(sofascore_data, home, away)
@@ -419,9 +442,10 @@ def run_pipeline(
             summary = step_summarize(
                 raw_match, competition_name, sofascore_data, incidents
             )
-            # Pass raw_match and sofascore_data so step_save can persist stats
             step_save(match_id, summary, incidents, raw_match, sofascore_data)
-            print(f"      ✔ Done.\n")
+            print(f"      ✓ Done.\n")
+
+            _cb("match_done", {"status": "ok", "home": home, "away": away})
             results.append({
                 "match_id": match_id,
                 "home_team": home,
@@ -431,6 +455,7 @@ def run_pipeline(
 
         except Exception as e:
             print(f"      ✗ Failed: {e}\n")
+            _cb("match_done", {"status": "error", "home": home, "away": away})
             results.append({
                 "match_id": match_id,
                 "home_team": home,
@@ -455,6 +480,7 @@ def run_pipeline(
     print(f"  Time elapsed: {elapsed}s")
     print("=" * 55 + "\n")
 
+    _cb("complete", {"ok": ok_count, "failed": fail_count})
     return results
 
 
@@ -494,6 +520,7 @@ Supported competition codes: PL, CL, PD, BL1, SA, FL1
     )
     args = parser.parse_args()
 
+    # CLI runs without a callback — progress_callback defaults to None
     run_pipeline(
         competition_code=args.competition,
         target_matchday=args.matchday,

@@ -2,14 +2,66 @@
 backend/api/routes.py
 
 Defines all REST API endpoints for the Football Analytics system.
+
+PIPELINE PROGRESS TRACKING (added this session):
+
+    Problem: The pipeline runs for several minutes. The old design blocked
+    the HTTP response until everything was done — frontend showed a spinner
+    with no feedback.
+
+    Solution: Two-part pattern:
+
+    1. BACKGROUND THREAD
+       POST /api/pipeline/run now starts the pipeline in a separate thread
+       using Python's threading.Thread. It returns { "status": "started" }
+       immediately — the HTTP response is not blocked.
+
+       threading.Thread(target=fn, daemon=True).start()
+         - target: the function to run in the background
+         - daemon=True: thread is killed automatically when the main process
+           exits — no orphaned threads if Flask shuts down
+
+    2. PROGRESS STORE
+       A module-level dict `_pipeline_progress` acts as shared state between
+       the background thread (writer) and the status endpoint (reader).
+
+       Why module-level dict and not a database?
+         Progress is ephemeral — we don't need it after the run finishes.
+         A dict is instant to read/write with no I/O overhead.
+
+       Is this thread-safe?
+         In CPython (standard Python), dict assignment is atomic due to the
+         GIL (Global Interpreter Lock). Simple key assignments like
+         `_pipeline_progress["current"] = "Arsenal vs Chelsea"` cannot be
+         interrupted mid-write. This is sufficient for our use case.
+         For production systems with multiple workers you'd use Redis instead.
+
+    3. GET /api/pipeline/status
+       Returns the current contents of _pipeline_progress.
+       PipelineButton polls this every 1.5 seconds while running.
 """
 
+import threading
 from flask import Blueprint, jsonify, request
 from sqlalchemy.orm import sessionmaker
 from backend.db.schema import engine, Match, Summary, MatchEvent, Team, Competition, MatchStat
 
 api = Blueprint("api", __name__)
 SessionLocal = sessionmaker(bind=engine)
+
+# ── Pipeline progress store ────────────────────────────────────────────────
+# Written by the pipeline thread, read by GET /api/pipeline/status.
+# States: "idle" | "running" | "complete" | "up_to_date" | "error"
+_pipeline_progress = {
+    "state":       "idle",
+    "competition": None,
+    "current":     None,   # e.g. "Arsenal FC vs Chelsea FC"
+    "index":       0,      # current match number (1-based)
+    "total":       0,      # total matches to process
+    "ok":          0,      # successfully completed
+    "failed":      0,      # failed
+    "error":       None,   # error message if state == "error"
+}
 
 
 def _get_db():
@@ -92,19 +144,7 @@ def get_match(match_id: int):
 def get_match_stats(match_id: int):
     """
     GET /api/matches/<id>/stats
-
     Returns team-level stats from the match_stats table.
-    Two rows per match — one home (is_home=True), one away (is_home=False).
-    Populated by the pipeline from SofaScore /match/statistics endpoint.
-
-    WHY match_stats AND NOT player_stats:
-        SofaScore returns possession, xG, shots as team aggregates.
-        match_stats stores them directly as two rows per match.
-        player_stats is for future per-player data sources and is
-        currently empty — querying it would always return available:false.
-
-    Returns available:false if pipeline hasn't run for this match,
-    or if SofaScore data was unavailable when it did.
     """
     session = _get_db()
     try:
@@ -125,9 +165,6 @@ def get_match_stats(match_id: int):
             })
 
         def _row_to_dict(row: MatchStat) -> dict:
-            # None values are preserved — frontend handles missing data.
-            # We never substitute fake zeros: a 0 on a stat bar looks
-            # like real data, which is misleading if the value is absent.
             return {
                 "possession":          row.possession,
                 "xg":                  row.xg,
@@ -221,9 +258,46 @@ def get_events(match_id: int):
         session.close()
 
 
+@api.route("/pipeline/status")
+def pipeline_status():
+    """
+    GET /api/pipeline/status
+    Returns the current state of the pipeline progress store.
+    Polled by PipelineButton every 1.5 seconds while running.
+    Safe to call at any time — always returns the current snapshot.
+    """
+    return jsonify(_pipeline_progress)
+
+
 @api.route("/pipeline/run", methods=["POST"])
 def run_pipeline():
-    """POST /api/pipeline/run — triggers ETL + summarization pipeline."""
+    """
+    POST /api/pipeline/run — starts pipeline in a background thread.
+
+    Returns { "status": "started" } immediately.
+    Progress is tracked in _pipeline_progress and readable via
+    GET /api/pipeline/status.
+
+    WHY A BACKGROUND THREAD:
+        The pipeline takes several minutes. Blocking the HTTP response
+        would cause the frontend to wait with no feedback, and eventually
+        time out. A background thread lets us return immediately while
+        the pipeline runs independently.
+
+    GUARD AGAINST DOUBLE-RUN:
+        If the pipeline is already running, we reject the request with 409
+        (Conflict). Running two pipelines simultaneously would cause race
+        conditions on the DB and exhaust the Groq token budget faster.
+    """
+    global _pipeline_progress
+
+    # Prevent double-run
+    if _pipeline_progress["state"] == "running":
+        return jsonify({
+            "status": "already_running",
+            "message": "Pipeline is already running. Wait for it to complete.",
+        }), 409
+
     try:
         from backend.main import run_pipeline as _run_pipeline, COMPETITIONS
 
@@ -237,17 +311,75 @@ def run_pipeline():
             }), 400
 
         comp_name = COMPETITIONS[competition_code]["name"]
-        results = _run_pipeline(competition_code=competition_code)
-        ok_count = sum(1 for r in results if r["status"] == "ok")
-        fail_count = len(results) - ok_count
+
+        # Reset progress store for this run
+        _pipeline_progress.update({
+            "state":       "running",
+            "competition": comp_name,
+            "current":     "Fetching match list...",
+            "index":       0,
+            "total":       0,
+            "ok":          0,
+            "failed":      0,
+            "error":       None,
+        })
+
+        def progress_callback(event: str, data: dict):
+            """
+            Called by the pipeline to report progress.
+            Events:
+              "total_found"  — how many matches need processing
+              "match_start"  — about to process a match
+              "match_done"   — match completed (ok or error)
+              "up_to_date"   — nothing to process
+              "complete"     — all done
+            """
+            if event == "total_found":
+                _pipeline_progress["total"] = data["total"]
+                if data["total"] == 0:
+                    _pipeline_progress["state"] = "up_to_date"
+                    _pipeline_progress["current"] = "Fetching matchups... seems up-to-date"
+
+            elif event == "match_start":
+                _pipeline_progress["current"] = (
+                    f"{data['home']} vs {data['away']}"
+                )
+                _pipeline_progress["index"] = data["index"]
+
+            elif event == "match_done":
+                if data["status"] == "ok":
+                    _pipeline_progress["ok"] += 1
+                else:
+                    _pipeline_progress["failed"] += 1
+
+            elif event == "up_to_date":
+                _pipeline_progress["state"] = "up_to_date"
+                _pipeline_progress["current"] = "Fetching matchups... seems up-to-date"
+
+            elif event == "complete":
+                _pipeline_progress["state"] = "complete"
+                _pipeline_progress["current"] = None
+
+        def run_in_background():
+            try:
+                _run_pipeline(
+                    competition_code=competition_code,
+                    progress_callback=progress_callback,
+                )
+            except Exception as e:
+                _pipeline_progress["state"] = "error"
+                _pipeline_progress["error"] = str(e)
+
+        # daemon=True: thread is killed when Flask process exits
+        thread = threading.Thread(target=run_in_background, daemon=True)
+        thread.start()
 
         return jsonify({
-            "status": "pipeline_complete",
+            "status": "started",
             "competition": comp_name,
-            "analysed": ok_count,
-            "failed": fail_count,
-            "results": results,
         })
 
     except Exception as e:
+        _pipeline_progress["state"] = "error"
+        _pipeline_progress["error"] = str(e)
         return jsonify({"error": str(e), "status": "pipeline_failed"}), 500
