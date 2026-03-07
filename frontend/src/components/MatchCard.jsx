@@ -1,4 +1,4 @@
-// src/components/MatchCard.jsx
+﻿// src/components/MatchCard.jsx
 //
 // Intercepts card click to fetch events + summary, determine animation type,
 // then calls onMatchClick to let MatchesPage show the transition overlay.
@@ -114,3 +114,4 @@ export default function MatchCard({ match, onMatchClick }) {
     </div>
   )
 }
+

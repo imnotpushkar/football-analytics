@@ -2,50 +2,42 @@
 //
 // Fixed top navigation bar.
 //
-// COMPETITION BADGES:
-//   Each competition has a custom SVG badge — geometric shapes in
-//   that competition's colours. These are NOT copied logos (trademark
-//   risk). They are original SVG designs that evoke the competition
-//   through colour and shape only.
+// SOLID BACKGROUND:
+//   Inline style backgroundColor instead of Tailwind bg-fk-surface.
+//   Inline styles always win specificity — guaranteed solid coverage
+//   when content scrolls behind a fixed element.
 //
-// NAMING:
-//   Nav links and the pipeline button show full competition names
-//   ("Premier League", "La Liga") not internal API codes ("PL", "PD").
-//   API codes are internal identifiers from Football-Data.org — users
-//   have no reason to know them. Full names are shown everywhere in the UI.
-//   The code field is kept in COMPETITION_LINKS for API calls only.
+// NAVIGATE TO / WITH STATE:
+//   When a competition button is clicked, we call navigate('/', { state: { fromNav: true } })
+//   The `fromNav: true` state flag tells MatchesPage that this navigation
+//   came from the navbar — meaning the user wants to see the match list,
+//   not just the hero. MatchesPage reads this flag to decide whether to
+//   auto-scroll to the match list after loading.
 //
-// ACTIVE STATE:
-//   useLocation() from React Router returns the current URL path.
-//   We compare path to each link's href to apply active styling.
+//   WHY PASS STATE THROUGH navigate():
+//   React Router's navigate() accepts a second argument { state: {} }.
+//   This state is attached to the history entry — it travels with the
+//   navigation and is readable in the destination component via useLocation().
+//   It is NOT stored in localStorage or sessionStorage — it only lives
+//   for that single navigation. This is the correct pattern for passing
+//   "why did we navigate here" context between pages.
 //
-// PIPELINE BUTTON + COMPETITION CONTEXT:
-//   We derive activeCode and activeLabel from the current pathname
-//   and pass both to PipelineButton:
-//     competition = API code  → sent in POST body
-//     label       = full name → shown on button and status message
+//   Two cases this handles:
+//   1. User on / switching competition → MatchesPage stays mounted,
+//      competition prop changes, scroll happens via the loading effect
+//   2. User on /matches/:id clicking navbar → MatchesPage remounts,
+//      location.state.fromNav is true, scroll happens after load
 
-import { Link, useLocation } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import PipelineButton from './PipelineButton'
 
-// ── Competition badge SVGs ────────────────────────────────────────────────
+// ── Competition badge SVGs ─────────────────────────────────────────────────
 
 function PLBadge() {
   return (
     <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-      <polygon
-        points="10,1 18,5.5 18,14.5 10,19 2,14.5 2,5.5"
-        fill="#3d195b"
-        stroke="#7b2d8b"
-        strokeWidth="1.5"
-      />
-      <polygon
-        points="10,4 15.5,7 15.5,13 10,16 4.5,13 4.5,7"
-        fill="none"
-        stroke="#00ff85"
-        strokeWidth="0.8"
-        opacity="0.6"
-      />
+      <polygon points="10,1 18,5.5 18,14.5 10,19 2,14.5 2,5.5" fill="#3d195b" stroke="#7b2d8b" strokeWidth="1.5"/>
+      <polygon points="10,4 15.5,7 15.5,13 10,16 4.5,13 4.5,7" fill="none" stroke="#00ff85" strokeWidth="0.8" opacity="0.6"/>
     </svg>
   )
 }
@@ -54,11 +46,7 @@ function CLBadge() {
   return (
     <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
       <circle cx="10" cy="10" r="9" fill="#001a4e" stroke="#c9a84c" strokeWidth="1.2"/>
-      <polygon
-        points="10,3 11.2,8 16,7 12.5,10.5 16,14 11.2,12 10,17 8.8,12 4,14 7.5,10.5 4,7 8.8,8"
-        fill="#c9a84c"
-        opacity="0.9"
-      />
+      <polygon points="10,3 11.2,8 16,7 12.5,10.5 16,14 11.2,12 10,17 8.8,12 4,14 7.5,10.5 4,7 8.8,8" fill="#c9a84c" opacity="0.9"/>
     </svg>
   )
 }
@@ -66,7 +54,7 @@ function CLBadge() {
 function LaLigaBadge() {
   return (
     <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-      <rect x="1" y="1" width="18" height="18" rx="3" fill="#ee8000" />
+      <rect x="1" y="1" width="18" height="18" rx="3" fill="#ee8000"/>
       <rect x="4" y="4" width="12" height="12" rx="1.5" fill="none" stroke="#ffffff" strokeWidth="1.2"/>
       <line x1="10" y1="4" x2="10" y2="16" stroke="#ffffff" strokeWidth="1.2" opacity="0.6"/>
     </svg>
@@ -86,105 +74,88 @@ function BundesligaBadge() {
 function SerieABadge() {
   return (
     <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-      <path
-        d="M10 1 L18 4 L18 12 Q18 17 10 19 Q2 17 2 12 L2 4 Z"
-        fill="#1a1a2e"
-        stroke="#003399"
-        strokeWidth="1.2"
-      />
-      <path
-        d="M10 4 L15 6.5 L15 12 Q15 15.5 10 17 Q5 15.5 5 12 L5 6.5 Z"
-        fill="none"
-        stroke="#0066cc"
-        strokeWidth="0.8"
-        opacity="0.7"
-      />
+      <path d="M10 1 L18 4 L18 12 Q18 17 10 19 Q2 17 2 12 L2 4 Z" fill="#1a1a2e" stroke="#003399" strokeWidth="1.2"/>
+      <path d="M10 4 L15 6.5 L15 12 Q15 15.5 10 17 Q5 15.5 5 12 L5 6.5 Z" fill="none" stroke="#0066cc" strokeWidth="0.8" opacity="0.7"/>
     </svg>
   )
 }
 
-// ── Competition nav links config ──────────────────────────────────────────
-// code:  API identifier — sent to Football-Data.org and Flask backend.
-//        Never shown in the UI. Must not change.
-// label: Human-readable name — shown in nav links and pipeline button.
-//        Safe to update without touching any backend code.
+const BADGE_MAP = {
+  PL:  PLBadge,
+  CL:  CLBadge,
+  PD:  LaLigaBadge,
+  BL1: BundesligaBadge,
+  SA:  SerieABadge,
+}
 
-const COMPETITION_LINKS = [
-  { href: '/',                 code: 'PL',  label: 'Premier League',   Badge: PLBadge         },
-  { href: '/champions-league', code: 'CL',  label: 'Champions League', Badge: CLBadge         },
-  { href: '/la-liga',          code: 'PD',  label: 'La Liga',          Badge: LaLigaBadge     },
-  { href: '/bundesliga',       code: 'BL1', label: 'Bundesliga',       Badge: BundesligaBadge },
-  { href: '/serie-a',          code: 'SA',  label: 'Serie A',          Badge: SerieABadge     },
-]
+// ── Navbar component ───────────────────────────────────────────────────────
 
-// ── Navbar component ──────────────────────────────────────────────────────
+function Navbar({ competitions, activeCompetition, onCompetitionChange }) {
+  const navigate = useNavigate()
 
-function Navbar() {
-  const { pathname } = useLocation()
-
-  // Derive active competition from current pathname.
-  // Used to pass the correct code + label to PipelineButton.
-  // Fallback to PL defaults if on a route that isn't a competition page
-  // (e.g. /matches/:id detail view — pipeline shouldn't be needed there).
-  const activeLink  = COMPETITION_LINKS.find(({ href }) =>
-    href === '/' ? pathname === '/' : pathname.startsWith(href)
-  )
-  const activeCode  = activeLink?.code  ?? 'PL'
-  const activeLabel = activeLink?.label ?? 'Premier League'
+  function handleCompetitionClick(comp) {
+    onCompetitionChange(comp)
+    // Pass fromNav: true so MatchesPage knows to scroll to match list
+    // after it finishes loading — even on a fresh remount from detail page
+    navigate('/', { state: { fromNav: true } })
+  }
 
   return (
-    <nav className="fixed top-0 left-0 right-0 z-50 bg-surface border-b border-bdr">
+    <nav
+      className="fixed top-0 left-0 right-0 z-50 border-b border-fk-bdr"
+      style={{ backgroundColor: '#181410' }}
+    >
       <div className="max-w-6xl mx-auto px-6 h-16 flex items-center justify-between gap-6">
 
-        {/* ── Wordmark ── */}
-        <Link to="/" className="flex items-center gap-3 shrink-0">
+        {/* Wordmark — resets to Premier League */}
+        <Link
+          to="/"
+          onClick={() => onCompetitionChange(competitions[0])}
+          className="flex items-center gap-3 shrink-0"
+        >
           <div>
-            <span className="font-display text-2xl text-textprimary tracking-wider">
+            <span className="font-display text-2xl text-fk-textprimary tracking-wider">
               FREEKICK
             </span>
-            <span className="block text-xs text-fkgreenbright -mt-1 tracking-widest uppercase font-condensed">
+            <span className="block text-xs text-fk-greenbright -mt-1 tracking-widest uppercase font-condensed">
               Match Intelligence
             </span>
           </div>
         </Link>
 
-        {/* ── Competition links — hidden on mobile ── */}
+        {/* Competition buttons */}
         <div className="hidden md:flex items-center gap-1">
-          {COMPETITION_LINKS.map(({ href, code, label, Badge }) => {
-            const isActive = href === '/'
-              ? pathname === '/'
-              : pathname.startsWith(href)
+          {competitions.map(comp => {
+            const isActive = comp.code === activeCompetition.code
+            const Badge = BADGE_MAP[comp.code]
 
             return (
-              <Link
-                key={code}
-                to={href}
-                title={label}
-                className={`
-                  flex items-center gap-2 px-3 py-1.5 rounded
-                  font-condensed text-xs font-bold tracking-widest uppercase
-                  transition-colors duration-150
-                  ${isActive
-                    ? 'bg-surface3 text-textprimary border border-bdr'
-                    : 'text-textsecondary hover:text-textprimary hover:bg-surface2'
-                  }
-                `}
+              <button
+                key={comp.code}
+                onClick={() => handleCompetitionClick(comp)}
+                title={comp.label}
+                className={[
+                  'flex items-center gap-2 px-3 py-1.5 rounded',
+                  'font-condensed text-xs font-bold tracking-widest uppercase',
+                  'transition-colors duration-150',
+                  isActive
+                    ? 'bg-fk-surface3 text-fk-textprimary border border-fk-bdr'
+                    : 'text-fk-textsecondary hover:text-fk-textprimary hover:bg-fk-surface2',
+                ].join(' ')}
               >
-                <Badge />
-                <span>{label}</span>
-              </Link>
+                {Badge && <Badge />}
+                <span>{comp.label}</span>
+              </button>
             )
           })}
         </div>
 
-        {/* ── Pipeline button ── */}
-        {/*
-          Passes both the API code (competition) and the display name (label).
-          PipelineButton sends the code to the backend and shows the label
-          to the user — these two concerns are intentionally kept separate.
-        */}
+        {/* Pipeline button */}
         <div className="shrink-0">
-          <PipelineButton competition={activeCode} label={activeLabel} />
+          <PipelineButton
+            competition={activeCompetition.code}
+            label={activeCompetition.label}
+          />
         </div>
 
       </div>
