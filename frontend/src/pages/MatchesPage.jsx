@@ -172,7 +172,7 @@ export default function MatchesPage({ competition = DEFAULT_COMPETITION }) {
 
         <div className="relative z-10 flex flex-col items-center text-center">
           <p className="font-condensed text-xs font-bold tracking-widest uppercase text-fk-greenbright mb-3">
-            {competition.label} · Match Intelligence
+            · Match Intelligence ·
           </p>
           <h1
             className="font-display text-fk-textprimary leading-none mb-3"
