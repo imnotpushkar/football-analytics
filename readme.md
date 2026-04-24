@@ -44,9 +44,9 @@ tests/          # Unit tests
 ```
 
 
-##Run Frontend Server
-  \ncd frontend
+##Run Frontend Server -->
+  cd frontend
   npm run dev
 
-##Run Backend Server
+##Run Backend Server -->
   python -m backend.api.app
